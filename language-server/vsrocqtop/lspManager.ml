@@ -113,14 +113,11 @@ let inject_debug_events l =
 
 let do_configuration settings = 
   let open Settings in
-  let open Im.ExecutionManager in
-  let delegation_mode =
-    match settings.proof.delegation with
-    | None     -> CheckProofsInMaster
-    | Skip     -> SkipProofs
-    | Delegate -> DelegateProofsToWorkers { number_of_workers = Option.get settings.proof.workers }
+  let open Im.Im_main in
+  let delegation_mode = Im.Im_coq.translate_delegation_mode 
+    settings.proof.delegation (Option.get settings.proof.workers)
   in
-  Im.ExecutionManager.set_options {
+  Im.Im_main.set_options {
     delegation_mode;
     completion_options = settings.completion;
     enableDiagnostics = settings.diagnostics.enable;
@@ -228,7 +225,7 @@ let send_error_notification message =
   output_json @@ Jsonrpc.Notification.yojson_of_t @@ Lsp.Server_notification.to_jsonrpc notification
 
 let update_view uri st =
-  if (Im.ExecutionManager.is_diagnostics_enabled ()) then (
+  if (Im.Im_main.is_diagnostics_enabled ()) then (
     send_highlights uri st;
     publish_diagnostics uri st;
   )
@@ -425,7 +422,7 @@ let textDocumentCompletion id params =
   let return_completion ~isIncomplete ~items =
     Ok (Some (`CompletionList (Lsp.Types.CompletionList.create ~isIncomplete ~items ())))
   in
-  if not (Im.ExecutionManager.get_options ()).completion_options.enable then
+  if not (Im.Im_main.get_options ()).completion_options.enable then
     return_completion ~isIncomplete:false ~items:[], []
   else
   let Lsp.Types.CompletionParams.{ textDocument = { uri }; position } = params in

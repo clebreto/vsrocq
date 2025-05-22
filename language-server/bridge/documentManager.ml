@@ -21,6 +21,8 @@ open Protocol.ExtProtocol
 open Protocol.Printing
 open Common.Types
 
+module Em = Im.Im_main
+
 let Log log = Common.Log.mk_log "documentManager"
 
 type observe_id = Id of Common.Types.sentence_id | Top
@@ -45,7 +47,7 @@ type state = {
   init_vs : Vernacstate.t;
   opts : Coqargs.injection_command list;
   document : Dm.Document.document;
-  execution_state : Im.ExecutionManager.state;
+  execution_state : Em.state;
   observe_id : observe_id;
   cancel_handle : Sel.Event.cancellation_handle option;
   document_state: document_state;
@@ -57,10 +59,10 @@ type event =
       vst_for_next_todo : Vernacstate.t; (* the state to be used for the next
         todo, it is not necessarily the state of the last sentence, since it
         may have failed and this is a surrogate used for error resiliancy *)
-      task : Im.ExecutionManager.prepared_task;
+      task : Im.Im_types.prepared_task;
       started : float; (* time *)
     }
-  | ExecutionManagerEvent of Im.ExecutionManager.event
+  | ExecutionManagerEvent of Em.event
   | ParseBegin
   | Observe of Common.Types.sentence_id
   | SendProofView of (Common.Types.sentence_id option)
@@ -123,11 +125,11 @@ type events = event Sel.Event.t list
 
 let executed_ranges st mode =
   match st.observe_id, mode with
-  | _, Settings.Mode.Continuous -> Im.ExecutionManager.overview st.execution_state
+  | _, Settings.Mode.Continuous -> Em.overview st.execution_state
   | Top, Settings.Mode.Manual -> empty_overview
   | Id id, Settings.Mode.Manual ->
       let range = Dm.Document.range_of_id st.document id in
-      Im.ExecutionManager.overview_until_range st.execution_state range
+      Em.overview_until_range st.execution_state range
 
 let observe_id_range st = 
   let doc = Dm.Document.raw_document st.document in
@@ -232,8 +234,8 @@ let mk_parsing_error_diag st Dm.Document.{ msg = (oloc,msg); start; stop; qf } =
 
 let all_diagnostics st =
   let parse_errors = Dm.Document.parse_errors st.document in
-  let all_exec_errors = Im.ExecutionManager.all_errors st.execution_state in
-  let all_feedback = Im.ExecutionManager.all_feedback st.execution_state in
+  let all_exec_errors = Em.all_errors st.execution_state in
+  let all_feedback = Em.all_feedback st.execution_state in
   (* we are resilient to a state where invalidate was not called yet *)
   let exists (id,_) = Option.has_some (Dm.Document.get_sentence st.document id) in
   let not_info (_, (lvl, _, _, _)) = 
@@ -272,8 +274,8 @@ let id_of_pos_opt st = function
   | Some pos -> id_of_pos st pos
 
 let get_messages st id =
-  let error = Im.ExecutionManager.error st.execution_state id in
-  let feedback = Im.ExecutionManager.feedback st.execution_state id in
+  let error = Em.error st.execution_state id in
+  let feedback = Em.feedback st.execution_state id in
   let feedback = List.map (fun (lvl,_oloc,_,msg) -> DiagnosticSeverity.of_feedback_level lvl, pp_of_rocqpp msg) feedback  in
   match error with
   | Some (_oloc,msg) -> (DiagnosticSeverity.Error, pp_of_rocqpp msg) :: feedback
@@ -288,7 +290,7 @@ let get_info_messages st pos =
       | Feedback.Info -> true
       | _ -> false
     in
-    let feedback = Im.ExecutionManager.feedback st.execution_state id in
+    let feedback = Em.feedback st.execution_state id in
     let feedback = feedback |> List.filter info in
     List.map (fun (lvl,_oloc,_,msg) -> DiagnosticSeverity.of_feedback_level lvl, pp_of_rocqpp msg) feedback
 
@@ -316,7 +318,7 @@ let observe ~background state id ~should_block_on_error : (state * event Sel.Eve
   | None -> state, [] (* TODO error? *)
   | Some { id } ->
     Option.iter Sel.Event.cancel state.cancel_handle;
-    let vst_for_next_todo, execution_state, task, error_id = Im.ExecutionManager.build_tasks_for state.document (Dm.Document.schedule state.document) state.execution_state id should_block_on_error in
+    let vst_for_next_todo, execution_state, task, error_id = Em.build_tasks_for state.document (Dm.Document.schedule state.document) state.execution_state id should_block_on_error in
     match task with
     | Some task -> (* task will only be Some if there is no error *)
         let event = create_execution_event background (Execute {id; vst_for_next_todo; task; started = Unix.gettimeofday ()}) in
@@ -421,7 +423,7 @@ let interpret_to st id check_mode =
     let pv_event = mk_proof_view_event id in
     st, [event] @ [pv_event]
   | Settings.Mode.Continuous ->
-    match Im.ExecutionManager.is_locally_executed st.execution_state id with
+    match Em.is_locally_executed st.execution_state id with
     | true -> st, [mk_proof_view_event id]
     | false -> st, []
 
@@ -531,9 +533,9 @@ let validate_document state (Dm.Document.{unchanged_id; invalid_ids; previous_do
   in
   let execution_state =
     List.fold_left (fun st id ->
-      Im.ExecutionManager.invalidate previous_document (Dm.Document.schedule previous_document) id st
+      Em.invalidate previous_document (Dm.Document.schedule previous_document) id st
       ) state.execution_state (Stateid.Set.elements invalid_ids) in
-  let execution_state = Im.ExecutionManager.reset_overview execution_state previous_document in
+  let execution_state = Em.reset_overview execution_state previous_document in
   { state with  execution_state; observe_id; document_state = Parsed }
 
 [%%if rocq ="8.18" || rocq ="8.19"]
@@ -558,7 +560,7 @@ let init init_vs ~opts uri ~text =
   start_library top opts;
   let init_vs = Vernacstate.freeze_full_state () in
   let document = Dm.Document.create_document init_vs.Vernacstate.synterp text in
-  let execution_state, feedback = Im.ExecutionManager.init init_vs in
+  let execution_state, feedback = Em.init init_vs in
   let state = { uri; opts; init_vs; document; execution_state; observe_id=Top; cancel_handle = None; document_state = Parsing } in
   let priority = Some Common.PriorityManager.launch_parsing in
   let event = Sel.now ?priority ParseBegin in
@@ -568,8 +570,8 @@ let reset { uri; opts; init_vs; document; execution_state; } =
   let text = Dm.RawDocument.text @@ Dm.Document.raw_document document in
   Vernacstate.unfreeze_full_state init_vs;
   let document = Dm.Document.create_document init_vs.synterp text in
-  Im.ExecutionManager.destroy execution_state;
-  let execution_state, feedback = Im.ExecutionManager.init init_vs in
+  Em.destroy execution_state;
+  let execution_state, feedback = Em.init init_vs in
   let observe_id = Top in
   let state = { uri; opts; init_vs; document; execution_state; observe_id; cancel_handle = None ; document_state = Parsing } in
   let priority = Some Common.PriorityManager.launch_parsing in
@@ -583,8 +585,8 @@ let apply_text_edits state edits =
     let edit_start = Dm.RawDocument.loc_of_position (Dm.Document.raw_document state.document) range.Range.start in
     let edit_stop = Dm.RawDocument.loc_of_position (Dm.Document.raw_document state.document) range.Range.end_ in
     let edit_length = edit_stop - edit_start in
-    let exec_st = Im.ExecutionManager.shift_diagnostics_locs exec_st ~start:edit_stop ~offset:(String.length new_text - edit_length) in
-    let execution_state = Im.ExecutionManager.shift_overview exec_st ~before:(Dm.Document.raw_document state.document) ~after:(Dm.Document.raw_document document) ~start:edit_stop ~offset:(String.length new_text - edit_length) in
+    let exec_st = Em.shift_diagnostics_locs exec_st ~start:edit_stop ~offset:(String.length new_text - edit_length) in
+    let execution_state = Em.shift_overview exec_st ~before:(Dm.Document.raw_document state.document) ~after:(Dm.Document.raw_document document) ~start:edit_stop ~offset:(String.length new_text - edit_length) in
     {state with execution_state; document}
   in
   let state = List.fold_left apply_edit_and_shift_diagnostics_locs_and_overview state edits in
@@ -607,7 +609,7 @@ let execute st id vst_for_next_todo started task background block =
       match st.observe_id with
       | Top -> []
       | Id o_id ->
-        let s_id = Im.ExecutionManager.get_id_of_executed_task task in
+        let s_id = Im.Im_types.get_id_of_executed_task task in
         if o_id = s_id then
           [mk_proof_view_event s_id]
         else []
@@ -622,7 +624,7 @@ let execute st id vst_for_next_todo started task background block =
   | Some _ ->
     log (fun () -> Printf.sprintf "ExecuteToLoc %d continues after %2.3f" (Stateid.to_int id) time);
     let (next, execution_state,vst_for_next_todo,events, exec_error) =
-      Im.ExecutionManager.execute st.execution_state st.document (vst_for_next_todo, [], false) task block in
+      Em.execute st.execution_state st.document (vst_for_next_todo, [], false) task block in
     let st, block_events =
       match exec_error with
       | None -> st, []
@@ -645,23 +647,23 @@ let execute st id vst_for_next_todo started task background block =
 let get_proof st diff_mode id =
   let previous_st id =
     let oid = fst @@ Common.Scheduler.task_for_sentence (Dm.Document.schedule st.document) id in
-    Option.bind oid (Im.ExecutionManager.get_vernac_state st.execution_state)
+    Option.bind oid (Em.get_vernac_state st.execution_state)
   in
   let observe_id = to_sentence_id st.observe_id in
   let oid = Option.append id observe_id in
-  let ost = Option.bind oid (Im.ExecutionManager.get_vernac_state st.execution_state) in
+  let ost = Option.bind oid (Em.get_vernac_state st.execution_state) in
   let previous = Option.bind oid previous_st in
   Option.bind ost (ProofState.get_proof ~previous diff_mode)
 
 let handle_execution_manager_event st ev =
-  let id, execution_state_update, events = Im.ExecutionManager.handle_event ev st.execution_state in
+  let id, execution_state_update, events = Em.handle_event ev st.execution_state in
   let st = 
     match (id, execution_state_update) with
     | Some id, Some exec_st ->
-      let execution_state = Im.ExecutionManager.update_processed id exec_st st.document in
+      let execution_state = Em.update_processed id exec_st st.document in
       Some {st with execution_state}
     | Some id, None ->
-      let execution_state = Im.ExecutionManager.update_processed id st.execution_state st.document in
+      let execution_state = Em.update_processed id st.execution_state st.document in
       Some {st with execution_state}
     | _, _ -> Option.map (fun execution_state -> {st with execution_state}) execution_state_update
   in
@@ -725,8 +727,8 @@ let handle_event ev st ~block check_mode diff_mode =
     {state=(Some st); events=[]; update_view=false; notification}
 
 let context_of_id st = function
-  | None -> Some (Im.ExecutionManager.get_initial_context st.execution_state)
-  | Some id -> Im.ExecutionManager.get_context st.execution_state id
+  | None -> Some (Em.get_initial_context st.execution_state)
+  | Some id -> Em.get_context st.execution_state id
 
 (** Get context at the start of the sentence containing [pos] *)
 let get_context st pos = context_of_id st (id_of_pos st pos)
@@ -737,8 +739,8 @@ let get_completions st pos =
       log (fun () -> "Can't get completions, no sentence found before the cursor");
       []
   | Some id ->
-    let ost = Im.ExecutionManager.get_vernac_state st.execution_state id in
-    let settings = Im.ExecutionManager.get_options () in
+    let ost = Em.get_vernac_state st.execution_state id in
+    let settings = Em.get_options () in
     match Option.bind ost @@ CompletionSuggester.get_completions settings.completion_options with
     | None -> 
         log (fun () -> "No completions available");
@@ -983,8 +985,8 @@ module Internal = struct
     let code_lines_by_id = Dm.Document.code_lines_sorted_by_loc st.document in
     let code_lines_by_end = Dm.Document.code_lines_by_end_sorted_by_loc st.document in
     let string_of_state id =
-      if Im.ExecutionManager.is_locally_executed st.execution_state id then "(executed)"
-      else if Im.ExecutionManager.is_remotely_executed st.execution_state id then "(executed in worker)"
+      if Em.is_locally_executed st.execution_state id then "(executed)"
+      else if Em.is_remotely_executed st.execution_state id then "(executed in worker)"
       else "(not executed)"
     in
     let string_of_item item =

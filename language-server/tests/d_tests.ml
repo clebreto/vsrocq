@@ -11,7 +11,7 @@ let validate_document parsed_document =
   handle_d_events todo doc
 
 let trdeps doc s1 =
-  (* This closure should be an API used in Schedule used by ExecutionManager *)
+  (* This closure should be an API used in Schedule used by Im_main *)
   let rec trclose f s =
     let s' = Stateid.Set.fold (fun x acc -> Stateid.Set.union (f x) acc) s s in
     if Stateid.Set.equal s s' then s

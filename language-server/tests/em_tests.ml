@@ -19,7 +19,7 @@ open Protocol
 [@@@warning "-27"]
 
 let set_delegation_mode mode =
-  ExecutionManager.(set_options { delegation_mode = mode; completion_options = { enable = false; unificationLimit = 100; algorithm = StructuredSplitUnification; atomicFactor = 5.; sizeFactor = 5. }; enableDiagnostics = true })
+  Im_main.(set_options { delegation_mode = mode; completion_options = { enable = false; unificationLimit = 100; algorithm = StructuredSplitUnification; atomicFactor = 5.; sizeFactor = 5. }; enableDiagnostics = true })
 
 let%test_unit "exec: finished proof" =
   let st, events = em_init_test_doc ~text:"Lemma x : True. trivial. Qed. Check x." in
@@ -41,7 +41,7 @@ let%test_unit "exec: finished proof skip" =
   check_diag st [
     D (s4.id,Information,".*True.*")
   ];
-  ExecutionManager.set_default_options ()
+  Im_main.set_default_options ()
 
 let%test_unit "exec: unfinished proof" =
   let st, events = em_init_test_doc ~text:"Lemma x : True. Qed. Check x." in
@@ -49,7 +49,7 @@ let%test_unit "exec: unfinished proof" =
   let st, exec_events = DocumentManager.interpret_to_end st Settings.Mode.Manual in
   let todo = Sel.Todo.(add events exec_events) in
   let st = handle_dm_events todo st in
-  let errors = ExecutionManager.all_errors (DocumentManager.Internal.execution_state st) in
+  let errors = Im_main.all_errors (DocumentManager.Internal.execution_state st) in
   [%test_eq: bool] true (1 = List.length errors);
   check_diag st [
     D (s2.id,Error,".*incomplete proof.*");
@@ -71,7 +71,7 @@ let%test_unit "exec: unfinished proof skip" =
   check_diag st [
     D (s3.id,Information,".*True.*")
   ];
-  ExecutionManager.set_default_options ()
+  Im_main.set_default_options ()
 
 let%test_unit "exec: unfinished proof delegate" =
   let st, events = em_init_test_doc ~text:"Lemma x : True. Qed. Check x." in
@@ -86,7 +86,7 @@ let%test_unit "exec: unfinished proof delegate" =
   check_diag st [
     D (s3.id,Information,".*True.*")
   ];
-  ExecutionManager.set_default_options ()
+  Im_main.set_default_options ()
 
 
 let%test_unit "exec: unstarted proof" =

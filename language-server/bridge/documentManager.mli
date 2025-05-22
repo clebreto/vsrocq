@@ -146,7 +146,7 @@ module Internal : sig
 
   val document : state -> Dm.Document.document
   val raw_document : state -> Dm.RawDocument.t
-  val execution_state : state -> Im.ExecutionManager.state
+  val execution_state : state -> Im.Im_main.state
   val string_of_state : state -> string
   val observe_id : state -> sentence_id option
   val inject_doc_events : Dm.Document.event Sel.Event.t list -> event Sel.Event.t list

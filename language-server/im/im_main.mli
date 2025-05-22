@@ -19,16 +19,13 @@ open Protocol
     defined by the scheduler), caching event states and invalidating
     them. It can delegate to worker processes via DelegationManager *)
 
-type delegation_mode =
-  | CheckProofsInMaster
-  | SkipProofs
-  | DelegateProofsToWorkers of { number_of_workers : int }
-
 type options = {
-  delegation_mode : delegation_mode;
+  delegation_mode : Im_coq.delegation_mode;
   completion_options : Settings.Completion.t;
   enableDiagnostics : bool;
 }
+
+type errored_sentence = (sentence_id * Im_coq.loc option) option
 
 val is_diagnostics_enabled: unit -> bool
 
@@ -36,9 +33,6 @@ val is_diagnostics_enabled: unit -> bool
 type state
 type event
 type events = event Sel.Event.t list
-type errored_sentence = (sentence_id * Loc.t option) option
-
-type feedback_message = Feedback.level * Loc.t option * Quickfix.t list * Pp.t
 
 val pr_event : event -> Pp.t
 val init : Vernacstate.t -> state * event Sel.Event.t
@@ -50,9 +44,9 @@ val set_default_options : unit -> unit
 val invalidate : Dm.Document.document -> Common.Scheduler.schedule -> sentence_id -> state -> state
 
 val error : state -> sentence_id -> (Loc.t option * Pp.t) option
-val feedback :  state -> sentence_id -> feedback_message list
+val feedback :  state -> sentence_id -> Im_coq.feedback_message list
 val all_errors : state -> (sentence_id * (Loc.t option * Pp.t * Quickfix.t list option)) list
-val all_feedback : state -> (sentence_id * feedback_message) list
+val all_feedback : state -> (sentence_id * Im_coq.feedback_message) list
 
 val reset_overview : state -> Dm.Document.document -> state
 val shift_overview : state -> before:Dm.RawDocument.t -> after:Dm.RawDocument.t -> start:int -> offset:int -> state
@@ -76,13 +70,12 @@ val handle_event : event -> state -> (sentence_id option * state option * events
 
 (** Execution happens in two steps. In particular the event one takes only
     one task at a time to ease checking for interruption *)
-type prepared_task
-val get_id_of_executed_task : prepared_task -> sentence_id
-val build_tasks_for : Dm.Document.document -> Common.Scheduler.schedule -> state -> sentence_id -> bool -> Vernacstate.t * state * prepared_task option * errored_sentence
-val execute : state -> Dm.Document.document -> Vernacstate.t * events * bool -> prepared_task -> bool -> (prepared_task option * state * Vernacstate.t * events * errored_sentence)
 
-(* val update_overview : prepared_task -> prepared_task list -> state -> Document.document -> state
-val cut_overview : prepared_task -> state -> Document.document -> state *)
+val build_tasks_for : Dm.Document.document -> Common.Scheduler.schedule -> state -> sentence_id -> bool -> Vernacstate.t * state * Im_types.prepared_task option * errored_sentence
+val execute : state -> Dm.Document.document -> Vernacstate.t * events * bool -> Im_types.prepared_task -> bool -> (Im_types.prepared_task option * state * Vernacstate.t * events * errored_sentence)
+
+(* val update_overview : Im_types.prepared_task -> Im_types.prepared_task list -> state -> Document.document -> state
+val cut_overview : Im_types.prepared_task -> state -> Document.document -> state *)
 val update_processed : sentence_id -> state -> Dm.Document.document -> state
 val prepare_overview : state -> LspWrapper.Range.t list -> state
 val overview : state -> exec_overview

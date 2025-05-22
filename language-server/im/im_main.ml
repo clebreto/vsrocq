@@ -17,40 +17,32 @@ open Protocol.LspWrapper
 open Common.Scheduler
 open Common.Types
 
-let Log log = Common.Log.mk_log "executionManager"
+let log = Im_types.log
 
-type feedback_message = Feedback.level * Loc.t option * Quickfix.t list * Pp.t
+type errored_sentence = (sentence_id * Im_coq.loc option) option
 
 type execution_status =
-  | Success of Vernacstate.t option
-  | Error of Pp.t Loc.located * Quickfix.t list option * Vernacstate.t option (* State to use for resiliency *)
+  | Success of Im_coq.success option
+  | Error of Im_coq.failure (* State to use for resiliency *)
 
 let success vernac_st = Success (Some vernac_st)
-let error loc qf msg vernac_st = Error ((loc,msg), qf, (Some vernac_st))
 
-type sentence_id = Stateid.t
+module SM = Map.Make (Im_coq.Stateid)
 
-type errored_sentence = (sentence_id * Loc.t option) option
-
-module SM = Map.Make (Stateid)
+let error a b c d = Error (Im_coq.error a b c d)
 
 type sentence_state =
   | Done of execution_status
   | Delegated of DelegationManager.job_handle * (execution_status -> unit) option
 
-type delegation_mode =
-  | CheckProofsInMaster
-  | SkipProofs
-  | DelegateProofsToWorkers of { number_of_workers : int }
-
 type options = {
-  delegation_mode : delegation_mode;
+  delegation_mode : Im_coq.delegation_mode;
   completion_options : Settings.Completion.t;
   enableDiagnostics : bool
 }
 
 let default_options = {
-  delegation_mode = CheckProofsInMaster;
+  delegation_mode = Im_coq.default_delegation_mode;
   completion_options = {
     enable = false;
     algorithm = StructuredSplitUnification;
@@ -66,44 +58,20 @@ let fresh_doc_id () = incr doc_id; !doc_id
 
 type document_id = int
 
-type rocq_feedback_listener = int
-
-type delegated_task = { 
-  terminator_id: sentence_id;
-  opener_id: sentence_id;
-  proof_using: Vernacexpr.section_subset_expr;
-  last_step_id: sentence_id option; (* only for setting a proof remotely *)
-  tasks: executable_sentence list;
-}
-
-type prepared_task =
-  | PSkip of { id: sentence_id; error: Pp.t option }
-  | PBlock of { id: sentence_id; error: Pp.t Loc.located }
-  | PExec of executable_sentence
-  | PQuery of executable_sentence
-  | PDelegate of delegated_task
-
+type feedback_listener = int
 
 type state = {
-  initial : Vernacstate.t;
-  of_sentence : (sentence_state * feedback_message list) SM.t;
-  todo: prepared_task list; (* execution queue *)
+  initial : Im_coq.initial;
+  of_sentence : (sentence_state * Im_coq.feedback_message list) SM.t;
+  todo: Im_types.prepared_task list; (* execution queue *)
 
   (* ugly stuff to correctly dispatch Rocq feedback *)
   doc_id : document_id; (* unique number used to interface with Rocq's Feedback *)
-  rocq_feeder : rocq_feedback_listener;
-  sel_feedback_queue : (Feedback.route_id * sentence_id * feedback_message) Queue.t;
+  rocq_feeder : feedback_listener;
+  sel_feedback_queue : (Im_coq.feedback_route_id * sentence_id * Im_coq.feedback_message) Queue.t;
   sel_cancellation_handle : Sel.Event.cancellation_handle;
   overview: exec_overview;
 }
-
-let get_id_of_executed_task task =
-  match task with
-  | PSkip {id} -> id
-  | PBlock {id} -> id
-  | PExec {id} -> id
-  | PQuery {id} -> id
-  | PDelegate {terminator_id} -> terminator_id
 
 let print_exec_overview overview =
   let {processing; processed; prepared } = overview in
@@ -131,7 +99,7 @@ let get_options () = !options
 module ProofJob = struct
   type update_request =
     | UpdateExecStatus of sentence_id * execution_status
-    | AppendFeedback of Feedback.route_id * Common.Types.sentence_id * (Feedback.level * Loc.t option * Quickfix.t list * Pp.t)
+    | AppendFeedback of Im_coq.feedback_route_id * Common.Types.sentence_id * (Im_coq.feedback_level * Im_coq.loc option * Quickfix.t list * Pp.t)
   let appendFeedback (rid,sid) fb = AppendFeedback(rid,sid,fb)
 
   type t = {
@@ -149,7 +117,7 @@ end
 module ProofWorker = DelegationManager.MakeWorker(ProofJob)
 
 type event =
-  | LocalFeedback of (Feedback.route_id * sentence_id * feedback_message) Queue.t * (Feedback.route_id * sentence_id * feedback_message) list
+  | LocalFeedback of (Im_coq.feedback_route_id * sentence_id * Im_coq.feedback_message) Queue.t * (Im_coq.feedback_route_id * sentence_id * Im_coq.feedback_message) list
   | ProofWorkerEvent of ProofWorker.delegation
 
 type events = event Sel.Event.t list
@@ -276,7 +244,7 @@ let interp_qed_delayed ~proof_using ~state_id ~st =
 
 let cut_overview task state document =
   let range = match task with
-  | PDelegate { terminator_id } -> Dm.Document.range_of_id_with_blank_space document terminator_id
+  | Im_types.PDelegate { terminator_id } -> Dm.Document.range_of_id_with_blank_space document terminator_id
   | PSkip { id } | PExec { id } | PQuery { id } | PBlock { id } ->
     Dm.Document.range_of_id_with_blank_space document id
   in
@@ -323,7 +291,7 @@ let id_of_last_task ~default l =
 let update_processing task state document =
   let {processing; prepared} = state.overview in
   match task with
-  | PDelegate { opener_id; terminator_id; tasks } ->
+  | Im_types.PDelegate { opener_id; terminator_id; tasks } ->
     let proof_opener_id = id_of_first_task ~default:opener_id tasks in
     let proof_closer_id = id_of_last_task ~default:terminator_id tasks in
     let proof_begin_range = Dm.Document.range_of_id_with_blank_space document proof_opener_id in
@@ -344,7 +312,7 @@ let update_processing task state document =
 let update_prepared task document state =
   let {prepared} = state.overview in
   match task with
-  | PDelegate { opener_id; terminator_id; tasks } ->
+  | Im_types.PDelegate { opener_id; terminator_id; tasks } ->
     let proof_opener_id = id_of_first_task ~default:opener_id tasks in
     let proof_closer_id = id_of_last_task ~default:terminator_id tasks in
     let proof_begin_range = Dm.Document.range_of_id_with_blank_space document proof_opener_id in
@@ -363,7 +331,7 @@ let update_prepared task document state =
 let update_overview task state document =
   let state = 
   match task with
-  | PDelegate { terminator_id } ->
+  | Im_types.PDelegate { terminator_id } ->
     let range = Dm.Document.range_of_id_with_blank_space document terminator_id in
     let {prepared} = state.overview in
     let prepared = RangeList.remove_or_truncate_range range prepared in
@@ -533,34 +501,14 @@ let destroy st =
   feedback_cleanup st;
   Queue.iter (fun (h,c,_) -> DelegationManager.cancel_job h; Sel.Event.cancel c) jobs
 
-
-let last_opt l = try Some (CList.last l).id with Failure _ -> None
-
-let prepare_task task : prepared_task list =
+let prepare_task task : Im_types.prepared_task list =
   match task with
   | Skip { id; error } -> [PSkip { id; error }]
   | Block { id; error } -> [PBlock {id; error}]
   | Exec e -> [PExec e]
   | Query e -> [PQuery e]
   | OpaqueProof { terminator; opener_id; tasks; proof_using} ->
-      match !options.delegation_mode with
-      | DelegateProofsToWorkers _ ->
-          log (fun () -> "delegating proofs to workers");
-          let last_step_id = last_opt tasks in
-          [PDelegate {terminator_id = terminator.id; opener_id; last_step_id; tasks; proof_using}]
-      | CheckProofsInMaster ->
-          log (fun () -> "running the proof in master as per config");
-          List.map (fun x -> PExec x) tasks @ [PExec terminator]
-      | SkipProofs ->
-          log (fun () -> Printf.sprintf "skipping proof made of %d tasks" (List.length tasks));
-          [PExec terminator]
-
-let id_of_prepared_task = function
-  | PSkip { id } -> id
-  | PBlock { id } -> id
-  | PExec ex -> ex.id
-  | PQuery ex -> ex.id
-  | PDelegate { terminator_id } -> terminator_id
+    Im_coq.do_opaque_proof !options.delegation_mode terminator opener_id tasks proof_using
 
 let purge_state = function
   | Success _ -> Success None
@@ -610,7 +558,7 @@ let worker_main { ProofJob.tasks; initial_vernac_state = vs; doc_id; terminator_
 
 let execute_task st (vs, events, interrupted) task =
   if interrupted then begin
-    let st = update st (id_of_prepared_task task) (Error ((None,Pp.str "interrupted"),None,None)) in
+    let st = update st (Im_types.id_of_prepared_task task) (Error ((None,Pp.str "interrupted"),None,None)) in
     let todo = [] in
     ({st with todo}, vs, events, true, None)
   end else
@@ -692,7 +640,7 @@ let execute_task st (vs, events, interrupted) task =
             (st, vs,events,false, None)
           end
     with Sys.Break ->
-      let st = update st (id_of_prepared_task task) (Error ((None,Pp.str "interrupted"),None,None)) in
+      let st = update st (Im_types.id_of_prepared_task task) (Error ((None,Pp.str "interrupted"),None,None)) in
       (st, vs, events, true, None)
 
 let execute st document (vs, events, interrupted) task block_on_first_error =
@@ -839,7 +787,7 @@ let invalidate1 of_sentence id =
 
 let cancel1 todo invalid_id =
   let task_of_id = function
-    | PSkip { id } | PExec { id } | PQuery { id } | PBlock { id } -> Stateid.equal id invalid_id
+    | Im_types.PSkip { id } | PExec { id } | PQuery { id } | PBlock { id } -> Stateid.equal id invalid_id
     | PDelegate _ -> false
   in
   List.filter task_of_id todo
@@ -856,10 +804,10 @@ let rec invalidate document schedule id st =
       Queue.push job jobs
     else begin
       Sel.Event.cancel cancellation;
-      removed := List.map (fun e -> PExec e) tasks :: !removed
+      removed := List.map (fun e -> Im_types.PExec e) tasks :: !removed
     end) old_jobs;
   let of_sentence = List.fold_left invalidate1 of_sentence
-    List.(concat (map (fun tasks -> map id_of_prepared_task tasks) !removed)) in
+    List.(concat (map (fun tasks -> map Im_types.id_of_prepared_task tasks) !removed)) in
   if of_sentence == st.of_sentence then st else
   let deps = Common.Scheduler.dependents schedule id in
   Stateid.Set.fold (invalidate document schedule) deps { st with of_sentence; todo }
